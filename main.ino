@@ -1,78 +1,108 @@
+// DeskPal
+// I was bored and i did this, that's all. I think i could have used another way to get the time more precisely, but im good with what i have right now
+// Made by https://github.com/brnomt
+// Use this however you want to, i don't care a lot really
+
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <HTTPClient.h>
 #include <time.h>
 
-// Configuración de la pantalla OLED
+// OLED screen configuration
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET    -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Configuración de red y MQTT
-const char* ssid = "SSID";          // Tu SSID de red
-const char* password = "PASSWORD";      // Tu contraseña WiFi
-const char* mqtt_server = "IP_ADD"; // IP del broker MQTT
+// Network and MQTT configuration
+const char* ssid = "<YOUR_SSID_GOES_HERE>";          // Your SSID
+const char* password = "<YOUR_PASSWORD_GOES_HERE>";  // Your password
+const char* mqtt_server = "<YOUR_MQTT_SERVER_IP_GOES_HERE>"; // MQTT broker IP
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
+// URLs for GET requests
+//I used a HTTP IN node in Node-RED, so it act as a trigger.
+const char* URL_PHRASE = "<YOUR_URL_GOES_HERE>";
+const char* URL_SPOTIFY = "<YOUR_URL_GOES_HERE>";
+
+// Variables for clock (updated via MQTT on "time/timeserver")
+String timeStr = "";
+
+// Variables for face and animation
 unsigned long lastFaceChangeTime = 0;
 unsigned long lastMessageTime = 0;
-int currentFace = 0;
+int currentFace = 0; // Values from 1 to 4
 bool isShowingMessage = false;
-
+String currentMessageType = "";  // "motiv" or "spotify"
 unsigned long lastMoveTime = 0;
-int offsetY = 0;  // Offset para mover la cara verticalmente
+int offsetY = 0;  // Offset for vertical face movement
 
-// Función para dibujar la cara, con parámetro de offset (por defecto 0)
-void drawFace(int select, int offset = 0) {
-  display.clearDisplay();
-  display.setTextSize(3);                // Se usa tamaño entero (3)
-  display.setTextColor(SSD1306_WHITE);
-  int cursorY = 20 - offset;
-  display.setCursor(20, cursorY);
+// Button variables (assuming button on GPIO2)
+#define BUTTON_PIN 1
+int lastButtonState = HIGH;
+unsigned long lastPressTime = 0;
+const unsigned long debounceDelay = 50;      // ms for debounce
+bool singleClickPending = false;
+const unsigned long clickThreshold = 300;    // ms to differentiate single vs double click
 
-  // Selección de la cara a dibujar
-  switch(select) {
-    case 1:
-      display.println("(^_^)");
-      break;
-    case 2:
-      display.println("(^-^)");
-      break;
-    case 3:
-      display.println("(@_@)");
-      break;
-    case 4:
-      display.println("(-_-) Zz...");
-      break;
-    default:
-      display.println("?_?");
-      break;
+// ------------------------------------------------------------------
+// Function to send a GET request without waiting for a response
+void sendHttpTrigger(const char* host, uint16_t port, const char* path) {
+  WiFiClient client;
+  if (client.connect(host, port)) {
+    client.print("GET ");
+    client.print(path);
+    client.print(" HTTP/1.1\r\nHost: ");
+    client.print(host);
+    client.print("\r\nConnection: close\r\n\r\n");
+    client.flush();
+    client.stop();
+    Serial.print("GET sent to ");
+    Serial.print(path);
+    Serial.println(" without waiting for response.");
+  } else {
+    Serial.println("Error connecting to server for GET request.");
   }
-  display.display();
 }
 
+// ------------------------------------------------------------------
+// Functions to trigger requests based on touch type
+void sendSingleClickRequest() {
+  Serial.println("Sending GET request for motivational phrase...");
+  sendHttpTrigger("<YOUR_MQTT_SERVER_IP_GOES_HERE>", 1881, "/motiv");
+}
+
+void sendDoubleClickRequest() {
+  Serial.println("Sending GET request for Spotify Now Playing...");
+  sendHttpTrigger("<YOUR_MQTT_SERVER_IP_GOES_HERE>", 1881, "/trigger");
+}
+
+// ------------------------------------------------------------------
+// MQTT callback function: updates the display based on topic
 void callback(char* topic, byte* payload, unsigned int length) {
-  // Usar un buffer estático para evitar la asignación dinámica de memoria
   const size_t bufferSize = 128;
   char message[bufferSize];
-  
-  // Asegurarse de no exceder el tamaño del buffer
   size_t copyLength = (length < bufferSize - 1) ? length : bufferSize - 1;
   memcpy(message, payload, copyLength);
   message[copyLength] = '\0';
 
-  Serial.print("Mensaje recibido: ");
+  Serial.print("Message received on [");
+  Serial.print(topic);
+  Serial.print("]: ");
   Serial.println(message);
-  
-  // Mostrar mensaje en la pantalla
-  if (copyLength > 0) {
+
+  if (strcmp(topic, "time/timeserver") == 0) {
+    timeStr = String(message);
+  }
+  else if (strcmp(topic, "spotify/nowplaying") == 0) {
+    currentMessageType = "spotify";
     display.clearDisplay();
-    display.setTextSize(1.5);  // Se usa un tamaño entero
+    display.setTextSize(1);
     display.setTextColor(SSD1306_WHITE);
     display.setCursor(0, 0);
     display.println(message);
@@ -80,105 +110,95 @@ void callback(char* topic, byte* payload, unsigned int length) {
     lastMessageTime = millis();
     isShowingMessage = true;
   }
-}
-
-void moveFace() {
-  // Cambiar el offset cada 2 segundos
-  if (millis() - lastMoveTime >= 1000) {
-    lastMoveTime = millis();
-    offsetY = (offsetY == 0) ? 5 : 0;  // Alterna entre 0 y 10 píxeles
-    drawFace(currentFace, offsetY);
+  else if (strcmp(topic, "motiv") == 0) {
+    currentMessageType = "motiv";
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    display.setCursor(0, 0);
+    display.println(message);
+    drawClockOverlay();
+    display.display();
+    lastMessageTime = millis();
+    isShowingMessage = true;
   }
 }
 
+// ------------------------------------------------------------------
+// Function to draw the clock overlay at the bottom right corner
+void drawClockOverlay() {
+  if(timeStr != "") {
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    int textWidth = timeStr.length() * 6;
+    int x = SCREEN_WIDTH - textWidth;
+    int y = SCREEN_HEIGHT - 8;
+    display.setCursor(x, y);
+    display.print(timeStr);
+  }
+}
+
+// ------------------------------------------------------------------
+// Function to reconnect to MQTT and subscribe to required topics
 void reconnect() {
-  // Reconecta a MQTT
   while (!client.connected()) {
-    Serial.println("Reconectando a MQTT...");
+    Serial.println("Reconnecting to MQTT...");
     if (client.connect("ESP32Client")) {
-      Serial.println("Conectado de nuevo.");
+      Serial.println("Connected to MQTT.");
       client.subscribe("spotify/nowplaying");
+      client.subscribe("time/timeserver");
+      client.subscribe("motiv");
     } else {
-      Serial.print("Fallo, código de estado=");
+      Serial.print("Failed, state code=");
       Serial.println(client.state());
       delay(5000);
     }
   }
 }
 
+// ------------------------------------------------------------------
 void setup() {
-  pinMode(9, OUTPUT);  // Configura GPIO9 como salida
-  digitalWrite(9, LOW); // Estado deseado
+  pinMode(BUTTON_PIN, INPUT);
+  pinMode(9, OUTPUT);
+  digitalWrite(9, LOW);
+  
   Serial.begin(115200);
-  Serial.println("Iniciando...");
+  Serial.println("Starting...");
 
-  // Inicializar la pantalla OLED
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {  
-    Serial.println("Error al iniciar la pantalla SSD1306");
-    while (true); // Bloquea si hay error
+    Serial.println("Error initializing SSD1306 display");
+    while (true);
   }
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(WHITE);
   display.setCursor(0, 10);
-  display.println("Conectando...");
+  display.println("Connecting...");
   display.display();
   delay(1000);
 
-  // Conexión a WiFi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
-    Serial.println("Conectando a WiFi...");
+    Serial.println("Connecting to WiFi...");
   }
-  Serial.println("Conectado a WiFi.");
-  display.clearDisplay();
-  display.println("WiFi: Conectado");
-  display.display();
-
-  // Configuración de MQTT
+  Serial.println("WiFi: Connected");
+  
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
-  while (!client.connected()) {
-    Serial.println("Conectando a MQTT...");
-    if (client.connect("ESP32Client")) {
-      Serial.println("Conectado a MQTT.");
-      if (client.subscribe("mqtt/sub")) {
-        Serial.println("Suscripción exitosa.");
-      } else {
-        Serial.println("Error al suscribirse.");
-      }
-    } else {
-      Serial.println("Fallo de conexión al servidor MQTT. Intentando de nuevo en 5 segundos...");
-      delay(5000);
-    }
-  }
-
-  // Mostrar una cara aleatoria al inicio
-  srand(time(NULL));
-  currentFace = random(1, 5); // Valores de 1 a 4
-  drawFace(currentFace);
+  reconnect();
+  
+  randomSeed(millis());
+  currentFace = random(1, 5);
   lastFaceChangeTime = millis();
 }
 
+// ------------------------------------------------------------------
 void loop() {
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
-  
-  // Si se muestra un mensaje y han pasado 2 segundos, vuelve a mostrar la cara
-  if (isShowingMessage && (millis() - lastMessageTime >= 2500)) {
-    isShowingMessage = false;
-    drawFace(currentFace);
-  }
-
-  moveFace();
-
-  // Cambia la cara cada minuto si no se está mostrando un mensaje
-  if (!isShowingMessage && (millis() - lastFaceChangeTime >= 60000)) {
-    currentFace = random(1, 5);
-    drawFace(currentFace);
-    lastFaceChangeTime = millis();
-  }
 }
+
+// If u read this, have a nice day!
