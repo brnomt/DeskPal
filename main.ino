@@ -19,16 +19,15 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Network and MQTT configuration
 const char* ssid = "<YOUR_SSID_GOES_HERE>";          // Your SSID
-const char* password = "<YOUR_PASSWORD_GOES_HERE>";  // Your password
+const char* password = "<YOUR_PASSWORD_GOES_HERE>";    // Your password
 const char* mqtt_server = "<YOUR_MQTT_SERVER_IP_GOES_HERE>"; // MQTT broker IP
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
 // URLs for GET requests
-//I used a HTTP IN node in Node-RED, so it act as a trigger.
-const char* URL_PHRASE = "<YOUR_URL_GOES_HERE>";
-const char* URL_SPOTIFY = "<YOUR_URL_GOES_HERE>";
+const char* URL_PHRASE = "<YOUR_URL_GOES_HERE>";   // Motivational phrase URL
+const char* URL_SPOTIFY = "<YOUR_URL_GOES_HERE>";  // Spotify trigger URL
 
 // Variables for clock (updated via MQTT on "time/timeserver")
 String timeStr = "";
@@ -48,7 +47,7 @@ int lastButtonState = HIGH;
 unsigned long lastPressTime = 0;
 const unsigned long debounceDelay = 50;      // ms for debounce
 bool singleClickPending = false;
-const unsigned long clickThreshold = 300;    // ms to differentiate single vs double click
+const unsigned long clickThreshold = 300;    // ms to differentiate single vs double tap
 
 // ------------------------------------------------------------------
 // Function to send a GET request without waiting for a response
@@ -71,14 +70,16 @@ void sendHttpTrigger(const char* host, uint16_t port, const char* path) {
 }
 
 // ------------------------------------------------------------------
-// Functions to trigger requests based on touch type
+// Functions to trigger requests based on button press type
 void sendSingleClickRequest() {
   Serial.println("Sending GET request for motivational phrase...");
+  // Censored host IP
   sendHttpTrigger("<YOUR_MQTT_SERVER_IP_GOES_HERE>", 1881, "/motiv");
 }
 
 void sendDoubleClickRequest() {
   Serial.println("Sending GET request for Spotify Now Playing...");
+  // Censored host IP
   sendHttpTrigger("<YOUR_MQTT_SERVER_IP_GOES_HERE>", 1881, "/trigger");
 }
 
@@ -125,7 +126,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ------------------------------------------------------------------
-// Function to draw the clock overlay at the bottom right corner
+// Function to draw the clock overlay in the bottom right corner (size 1)
 void drawClockOverlay() {
   if(timeStr != "") {
     display.setTextSize(1);
@@ -135,6 +136,61 @@ void drawClockOverlay() {
     int y = SCREEN_HEIGHT - 8;
     display.setCursor(x, y);
     display.print(timeStr);
+  }
+}
+
+// ------------------------------------------------------------------
+// Function to draw the face with animation
+void drawFace(int select, int offset = 0) {
+  display.clearDisplay();
+  
+  if(select == 4) {
+    display.setTextSize(3);
+    display.setTextColor(SSD1306_WHITE);
+    int cursorY = 10 - offset;
+    display.setCursor(0, cursorY);
+    display.print("(-_-)");
+    
+    // Fix text size for "Zz..." so it doesn't vary too much
+    display.setTextSize(1);
+    display.setCursor(0, cursorY + 32);
+    display.print("Zz...");
+  } else {
+    display.setTextSize(3);
+    display.setTextColor(SSD1306_WHITE);
+    int cursorY = 20 - offset;
+    display.setCursor(15, cursorY);
+    switch(select) {
+      case 1:
+        display.println("(^_^)");
+        break;
+      case 2:
+        display.println("(^-^)");
+        break;
+      case 3:
+        display.println("(@_@)");
+        break;
+      default:
+        display.println("?_?");
+        break;
+    }
+  }
+  
+  drawClockOverlay();
+  display.display();
+}
+
+// ------------------------------------------------------------------
+// Function to animate the face (offset animation)
+void moveFace() {
+  if (isShowingMessage) return;
+  if (millis() - lastMoveTime >= 1000) {
+    lastMoveTime = millis();
+    static int faceAnimationStep = 0;
+    const int offsets[] = {0, 2, 5, 10, 5, 2};
+    offsetY = offsets[faceAnimationStep];
+    faceAnimationStep = (faceAnimationStep + 1) % 6;
+    drawFace(currentFace, offsetY);
   }
 }
 
@@ -183,13 +239,17 @@ void setup() {
     Serial.println("Connecting to WiFi...");
   }
   Serial.println("WiFi: Connected");
-  
+  display.clearDisplay();
+  display.println("WiFi: Connected");
+  display.display();
+
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
   reconnect();
   
   randomSeed(millis());
   currentFace = random(1, 5);
+  drawFace(currentFace);
   lastFaceChangeTime = millis();
 }
 
@@ -199,6 +259,60 @@ void loop() {
     reconnect();
   }
   client.loop();
-}
+  
+  // Manage display time based on message type:
+  if (isShowingMessage) {
+    if (currentMessageType == "spotify" && (millis() - lastMessageTime >= 2000)) {
+      isShowingMessage = false;
+      drawFace(currentFace, offsetY);
+    }
+    else if (currentMessageType == "motiv" && (millis() - lastMessageTime >= 30000)) {
+      isShowingMessage = false;
+      drawFace(currentFace, offsetY);
+    }
+  }
+  
+  moveFace();
 
-// If u read this, have a nice day!
+  if (!isShowingMessage && (millis() - lastFaceChangeTime >= 60000)) {
+    currentFace = random(1, 5);
+    drawFace(currentFace, offsetY);
+    lastFaceChangeTime = millis();
+  }
+  
+  // Read the button state
+  int buttonState = digitalRead(BUTTON_PIN);
+  
+  // Detect rising edge
+  if (buttonState == HIGH && lastButtonState == LOW) {
+    unsigned long now = millis();
+    
+    // If a motivational message is showing, cancel immediately
+    if (isShowingMessage && currentMessageType == "motiv") {
+      Serial.println("Cancelling motivational phrase");
+      isShowingMessage = false;
+      drawFace(currentFace, offsetY);
+      lastPressTime = now;
+      singleClickPending = false;
+    }
+    else {
+      // Detect double tap
+      if (now - lastPressTime < clickThreshold) {
+        Serial.println("Double tap detected!");
+        singleClickPending = false;
+        sendDoubleClickRequest();
+      } else {
+        singleClickPending = true;
+      }
+      lastPressTime = now;
+    }
+  }
+  
+  if (singleClickPending && (millis() - lastPressTime >= clickThreshold)) {
+    Serial.println("Single tap detected!");
+    sendSingleClickRequest();
+    singleClickPending = false;
+  }
+  
+  lastButtonState = buttonState;
+}
