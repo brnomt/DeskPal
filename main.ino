@@ -8,7 +8,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <HTTPClient.h>
+//#include <HTTPClient.h>
 #include <time.h>
 
 // OLED screen configuration
@@ -128,36 +128,49 @@ void callback(char* topic, byte* payload, unsigned int length) {
 // ------------------------------------------------------------------
 // Function to draw the clock overlay in the bottom right corner (size 1)
 void drawClockOverlay() {
-  if(timeStr != "") {
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  int x, y = SCREEN_HEIGHT - 8;
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    // Connecting annimation
+    int dotCount = (millis() / 500) % 4; // 0 - 3 dots
+    String conectando = "Conectando";
+    for (int i = 0; i < dotCount; i++) {
+      conectando += ".";
+    }
+    int textWidth = conectando.length() * 6;
+    x = SCREEN_WIDTH - textWidth;
+    display.setCursor(x, y);
+    display.print(conectando);
+  } else if (timeStr != "") {
+    // Show clock if hour
     int textWidth = timeStr.length() * 6;
-    int x = SCREEN_WIDTH - textWidth;
-    int y = SCREEN_HEIGHT - 8;
+    x = SCREEN_WIDTH - textWidth;
     display.setCursor(x, y);
     display.print(timeStr);
   }
 }
+
 
 // ------------------------------------------------------------------
 // Function to draw the face with animation
 void drawFace(int select, int offset = 0) {
   display.clearDisplay();
   
+  display.setTextColor(SSD1306_WHITE);
+  
   if(select == 4) {
+    // Cara de sueño especial
     display.setTextSize(3);
-    display.setTextColor(SSD1306_WHITE);
     int cursorY = 10 - offset;
     display.setCursor(0, cursorY);
     display.print("(-_-)");
-    
-    // Fix text size for "Zz..." so it doesn't vary too much
     display.setTextSize(1);
     display.setCursor(0, cursorY + 32);
     display.print("Zz...");
   } else {
     display.setTextSize(3);
-    display.setTextColor(SSD1306_WHITE);
     int cursorY = 20 - offset;
     display.setCursor(15, cursorY);
     switch(select) {
@@ -168,7 +181,34 @@ void drawFace(int select, int offset = 0) {
         display.println("(^-^)");
         break;
       case 3:
-        display.println("(@_@)");
+        display.println("(*-*)");   // Cara asombrada
+        break;
+      case 5:
+        display.println("(>_<)");   // Cara enojada
+        break;
+      case 6:
+        display.println("(o_O) ?");   // Cara confundida
+        break;
+      case 7:
+        display.println("(7_7)");   // Cara de escepticismo
+        break;
+      case 8:
+        display.println("(T_T)");   // Cara llorando
+        break;
+      case 9:
+        display.println("(._.)");   // Cara random2
+        break;
+      case 10:
+        display.println("(^3^)");   // Cara dando un beso
+        break;
+      case 11:
+        display.println("(>u<)");   // Cara muy feliz, creo, no se
+        break;
+      case 12:
+        display.println("(;-;)");   // Cara tampoco sé
+        break;
+      case 13:
+        display.println("(.-.)");   // Cara Random
         break;
       default:
         display.println("?_?");
@@ -181,7 +221,7 @@ void drawFace(int select, int offset = 0) {
 }
 
 // ------------------------------------------------------------------
-// Function to animate the face (offset animation)
+// Función para animar la cara (animación de offset vertical)
 void moveFace() {
   if (isShowingMessage) return;
   if (millis() - lastMoveTime >= 1000) {
@@ -196,21 +236,23 @@ void moveFace() {
 
 // ------------------------------------------------------------------
 // Function to reconnect to MQTT and subscribe to required topics
-void reconnect() {
-  while (!client.connected()) {
-    Serial.println("Reconnecting to MQTT...");
+
+unsigned long lastReconnectAttempt = 0;
+const unsigned long reconnectInterval = 5000; // 5 segundos, por ejemplo
+
+void tryReconnect() {
+  if (millis() - lastReconnectAttempt >= reconnectInterval) {
+    Serial.println("Intentando reconexión a MQTT...");
     if (client.connect("ESP32Client")) {
-      Serial.println("Connected to MQTT.");
-      client.subscribe("spotify/nowplaying");
-      client.subscribe("time/timeserver");
-      client.subscribe("motiv");
-    } else {
-      Serial.print("Failed, state code=");
-      Serial.println(client.state());
-      delay(5000);
+      Serial.println("Reconectado al MQTT.");
+      client.subscribe("mqtt/1");
+      client.subscribe("mqtt/2");
+      client.subscribe("mqtt/3");
     }
+    lastReconnectAttempt = millis();
   }
 }
+
 
 // ------------------------------------------------------------------
 void setup() {
@@ -237,6 +279,20 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
     Serial.println("Connecting to WiFi...");
+    display.clearDisplay();
+    display.setCursor(0, 10);
+    display.println("Connecting.");
+    display.display();
+    delay(1000);
+    display.clearDisplay();
+    display.setCursor(0, 10);
+    display.println("Connecting..");
+    display.display();
+    delay(1000);
+    display.clearDisplay();
+    display.setCursor(0, 10);
+    display.println("Connecting...");
+    display.display();
   }
   Serial.println("WiFi: Connected");
   display.clearDisplay();
@@ -245,10 +301,10 @@ void setup() {
 
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
-  reconnect();
+  tryReconnect();
   
   randomSeed(millis());
-  currentFace = random(1, 5);
+  currentFace = random(1, 13);
   drawFace(currentFace);
   lastFaceChangeTime = millis();
 }
@@ -256,7 +312,7 @@ void setup() {
 // ------------------------------------------------------------------
 void loop() {
   if (!client.connected()) {
-    reconnect();
+    tryReconnect();
   }
   client.loop();
   
@@ -275,7 +331,7 @@ void loop() {
   moveFace();
 
   if (!isShowingMessage && (millis() - lastFaceChangeTime >= 60000)) {
-    currentFace = random(1, 5);
+    currentFace = random(1, 13);
     drawFace(currentFace, offsetY);
     lastFaceChangeTime = millis();
   }
